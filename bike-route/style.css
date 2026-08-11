@@ -1,0 +1,216 @@
+/*
+ * Bike Route plugin styles. Scoped under plugin-specific class prefixes so the
+ * globally-injected CSS can't leak into the host. Uses GeoLibre's design
+ * tokens (defined on :root and .dark) so the control and panel follow the
+ * in-app light/dark theme.
+ */
+
+/* Map control button */
+.bike-route-control.maplibregl-ctrl-group {
+  background: hsl(var(--secondary));
+  border: 1px solid hsl(var(--border));
+}
+
+.bike-route-control button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: hsl(var(--foreground));
+}
+
+.bike-route-control button:hover {
+  background: hsl(var(--foreground) / 0.1);
+}
+
+.bike-route-control button.is-active {
+  background: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
+}
+
+/* Panel body */
+.bike-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: hsl(var(--foreground));
+  overflow-y: auto;
+}
+
+.bike-intro {
+  margin: 0;
+  opacity: 0.85;
+}
+
+.bike-mode {
+  display: flex;
+}
+
+.bike-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  opacity: 0.9;
+}
+
+.bike-input {
+  background: hsl(var(--background));
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  padding: 6px 8px;
+  color: hsl(var(--foreground));
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.bike-input:focus {
+  outline: none;
+  border-color: hsl(var(--accent));
+}
+
+.bike-btn {
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  color: hsl(var(--foreground));
+  background: hsl(var(--secondary));
+}
+
+.bike-btn:hover {
+  background: hsl(var(--foreground) / 0.08);
+}
+
+.bike-btn-primary {
+  background: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
+  border-color: transparent;
+}
+
+.bike-btn-primary:hover {
+  filter: brightness(1.08);
+}
+
+.bike-btn-ghost {
+  background: transparent;
+}
+
+.bike-btn.is-on {
+  background: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
+  border-color: transparent;
+}
+
+.bike-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.bike-status {
+  font-size: 12px;
+  min-height: 16px;
+  opacity: 0.85;
+}
+
+.bike-status-err {
+  color: hsl(0 72% 51%);
+  opacity: 1;
+}
+
+.bike-status-ok {
+  color: hsl(142 71% 38%);
+  opacity: 1;
+}
+
+/* Result cards */
+.bike-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.bike-card {
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: hsl(var(--background));
+}
+
+.bike-card-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.bike-stat {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+  border-bottom: 1px dashed hsl(var(--border) / 0.6);
+}
+
+.bike-stat:last-child {
+  border-bottom: none;
+}
+
+.bike-stat-label {
+  opacity: 0.8;
+}
+
+.bike-stat-value {
+  font-weight: 600;
+}
+
+/* Terrain bars */
+.bike-bar-row {
+  margin: 6px 0;
+}
+
+.bike-bar-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  margin-bottom: 3px;
+}
+
+.bike-bar-track {
+  height: 7px;
+  border-radius: 4px;
+  background: hsl(var(--secondary));
+  overflow: hidden;
+}
+
+.bike-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+}
+
+/* Segment table */
+.bike-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.bike-table th,
+.bike-table td {
+  text-align: left;
+  padding: 4px 6px;
+  border-bottom: 1px solid hsl(var(--border) / 0.6);
+  white-space: nowrap;
+}
+
+.bike-table th {
+  opacity: 0.7;
+  font-weight: 600;
+}
+
+.bike-table tbody tr:hover {
+  background: hsl(var(--foreground) / 0.06);
+}

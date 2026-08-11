@@ -1,0 +1,10 @@
+{
+  "id": "geolibre-bike-route",
+  "name": "Bike Route",
+  "version": "1.0.0",
+  "description": "Find the fastest bicycle route between two points and report distance, estimated time, elevation gain/loss, min/max elevation, a terrain breakdown, and a per-segment grade table. Draws the route on the map with start/end pins.",
+  "entry": "index.js",
+  "style": "style.css",
+  "author": "Carl",
+  "homepage": "https://github.com/CJGutz/geolibre-bike-route-plugin"
+}
