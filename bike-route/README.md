@@ -22,24 +22,42 @@ per-segment grade table. The route is drawn on the map with start/end pins.
 ## Install (no build step needed)
 
 This plugin is a self-contained ES module, so you can install it straight from
-GitHub Pages **without cloning or building anything**.
+GitHub via the jsDelivr CDN **without cloning or building anything**.
 
-1. The plugin is published at:
-   `https://pages.github.io/...` (see the exact URL below after deploy)
-   Manifest: `<repo>/plugin.json` served over HTTPS with CORS.
-2. In GeoLibre: **Settings → Manage Plugins → Settings** (the extra-sources
-   section) → add a **manifest URL**:
-   `https://<pages-url>/plugin.json`
-3. Switch to the **All** tab, find **Bike Route**, and click **Install**.
+The plugin lives in the `bike-route/` folder of the `CJGutz/hermegjess` repo:
+`https://github.com/CJGutz/hermegjess/tree/main/bike-route`
 
-If you host the three files (`index.js`, `plugin.json`, `style.css`) anywhere
-over HTTPS, just point the manifest URL at that `plugin.json` instead.
+### Option A — via jsDelivr CDN (recommended, works today)
+
+The CDN proxies the GitHub files with correct `application/javascript` MIME and
+CORS. In GeoLibre: **Settings → Manage Plugins → Settings** (the extra-sources
+section) → add a **manifest URL**:
+
+```
+https://cdn.jsdelivr.net/gh/CJGutz/hermegjess@main/bike-route/plugin.json
+```
+
+Then switch to the **All** tab, find **Bike Route**, and click **Install**.
+
+### Option B — GitHub Pages (if/when enabled)
+
+If GitHub Pages is enabled on the repo, the equivalent URL is:
+
+```
+https://cjgutz.github.io/hermegjess/bike-route/plugin.json
+```
+
+### Option C — host it yourself
+
+Put the three files (`index.js`, `plugin.json`, `style.css`) anywhere over
+HTTPS with permissive CORS and point the manifest URL at that `plugin.json`.
 
 ### Local test (desktop app)
 
-Put the folder somewhere and add it as a **local directory** source in
-Settings → Manage Plugins → Settings, or copy it into the desktop plugins dir
-(`~/.local/share/org.geolibre.desktop/plugins/geolibre-bike-route/`) and restart.
+Copy the `bike-route/` folder into the desktop plugins directory
+(`~/.local/share/org.geolibre.desktop/plugins/geolibre-bike-route/`) and
+restart, or add the local folder as a **local directory** source in
+Settings → Manage Plugins → Settings.
 
 ## Files
 

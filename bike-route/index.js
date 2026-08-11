@@ -82,7 +82,10 @@ async function fetchJson(url, { timeout = CONFIG.timeoutMs } = {}) {
   try {
     const res = await fetch(url, {
       signal: ctrl.signal,
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "geolibre-bike-route/1.0.0",
+      },
     });
     if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
     return await res.json();
@@ -141,18 +144,50 @@ function sampleAlong(coordinates, maxSamples) {
 }
 
 async function fetchElevations(coordinates) {
-  const lats = coordinates.map((c) => c[1]).join(",");
-  const lons = coordinates.map((c) => c[0]).join(",");
-  const url = `${CONFIG.elevationBase}?latitude=${lats}&longitude=${lons}`;
-  const data = await fetchJson(url);
-  if (!data || !Array.isArray(data.elevation)) {
-    throw new Error("Elevation service returned no data");
+  // Open-Meteo elevation accepts only so many points per request, so chunk.
+  const CHUNK = 50;
+  const out = [];
+  for (let i = 0; i < coordinates.length; i += CHUNK) {
+    const slice = coordinates.slice(i, i + CHUNK);
+    const lats = slice.map((c) => c[1]).join(",");
+    const lons = slice.map((c) => c[0]).join(",");
+    const url = `${CONFIG.elevationBase}?latitude=${lats}&longitude=${lons}`;
+    const data = await fetchJson(url);
+    if (!data || !Array.isArray(data.elevation)) {
+      throw new Error("Elevation service returned no data");
+    }
+    out.push(...data.elevation);
   }
-  return data.elevation; // metres, same order as coordinates
+  return out; // metres, same order as coordinates
 }
 
 // Build per-step metrics and aggregate stats from coords + elevations.
+// Elevation is lightly smoothed (moving average) first, then each vertex's
+// grade is measured over a fixed distance window (not just its two neighbours)
+// so the per-segment read reflects real terrain, not SRTM-scale noise.
+const GRADE_WINDOW = 50; // metres the grade is averaged over
+
 function buildMetrics(coordinates, elevations) {
+  const elev = smoothElevations(elevations, 5);
+  const n = coordinates.length;
+
+  // Cumulative distance along the route.
+  const cum = new Array(n).fill(0);
+  for (let i = 1; i < n; i++) {
+    cum[i] = cum[i - 1] + haversine(coordinates[i - 1], coordinates[i]);
+  }
+
+  // Grade at vertex i, averaged over ±GRADE_WINDOW/2 of route distance.
+  function gradeAt(i) {
+    let lo = i;
+    let hi = i;
+    while (lo > 0 && cum[i] - cum[lo] < GRADE_WINDOW / 2) lo--;
+    while (hi < n - 1 && cum[hi] - cum[i] < GRADE_WINDOW / 2) hi++;
+    const d = cum[hi] - cum[lo];
+    if (d <= 0) return 0;
+    return ((elev[hi] - elev[lo]) / d) * 100;
+  }
+
   const steps = [];
   let ascent = 0;
   let descent = 0;
@@ -167,13 +202,13 @@ function buildMetrics(coordinates, elevations) {
     const a = coordinates[i - 1];
     const b = coordinates[i];
     const segLen = haversine(a, b);
-    const dEle = elevations[i] - elevations[i - 1];
-    const grade = segLen > 0 ? (dEle / segLen) * 100 : 0;
+    const dEle = elev[i] - elev[i - 1];
     if (dEle > 0) ascent += dEle;
     else descent += -dEle;
-    maxEle = Math.max(maxEle, elevations[i]);
-    minEle = Math.min(minEle, elevations[i]);
+    maxEle = Math.max(maxEle, elev[i]);
+    minEle = Math.min(minEle, elev[i]);
 
+    const grade = gradeAt(i);
     const cat = gradeCategory(grade);
     if (Math.abs(grade) < 2) flat += segLen;
     else if (Math.abs(grade) < 5) rolling += segLen;
@@ -522,15 +557,17 @@ function buildPanelBody(container, app) {
     const txt = `${ll.lng.toFixed(5)}, ${ll.lat.toFixed(5)}`;
     if (pickWhich === "start") {
       startInput.value = txt;
-      if (mapInstance && mapInstance.getCanvas) {
-        new window.maplibregl.Marker({ color: "#1c7ed6" })
+      if (mapInstance && window.maplibregl && startMarker?.remove) startMarker.remove();
+      if (mapInstance && window.maplibregl) {
+        startMarker = new window.maplibregl.Marker({ color: "#1c7ed6" })
           .setLngLat([ll.lng, ll.lat])
           .addTo(mapInstance);
       }
     } else {
       endInput.value = txt;
-      if (mapInstance && mapInstance.getCanvas) {
-        new window.maplibregl.Marker({ color: "#e03131" })
+      if (mapInstance && window.maplibregl && endMarker?.remove) endMarker.remove();
+      if (mapInstance && window.maplibregl) {
+        endMarker = new window.maplibregl.Marker({ color: "#e03131" })
           .setLngLat([ll.lng, ll.lat])
           .addTo(mapInstance);
       }
