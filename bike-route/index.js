@@ -1141,7 +1141,7 @@ const disposers = [];
 export const plugin = {
   id: PLUGIN_ID,
   name: "Bike Route",
-  version: "1.0.0",
+  version: "1.1.0",
   activate(app) {
     appApi = app;
     const added = app.addMapControl(control, "top-right");
