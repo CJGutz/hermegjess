@@ -18,10 +18,13 @@ steepness, with start/end pins; highlights are dropped as clickable pins.
 - **Calorie estimate** (~25 kcal/km + 0.8 kcal per metre climbed).
 - **Turn-by-turn directions** with maneuver arrows (from OSRM steps).
 - **POIs along the route**: drinking water, bike shops, charging, viewpoints,
-  picnic sites, peaks (from Overpass) — clickable on the map.
-- **Surface estimate** (paved vs unpaved) from OpenStreetMap surface tags.
+  picnic sites, peaks (from Overpass) — clickable pins that fly to location.
+- **Path type & surface**: the *kind of way* (cycleway, footway, residential
+  road, track, path, steps…) from OpenStreetMap `highway` tags, plus the
+  surface mix (paved vs unpaved, named surfaces), `tracktype`, and average
+  speed limit — computed by snapping the route to real OSM ways.
 - **Place names** for start/end via Photon (komoot's geocoder) reverse lookup.
-- **Route colouring** by steepness, start/end pins, fit-to-route view.
+- **Route colouring** by steepness, start/end pins, fit-to-route.
 - **Drop pins on map** mode + "use map center as end" button.
 - Tabs: Overview / Directions / Highlights.
 
@@ -89,6 +92,15 @@ All optional host APIs are called with `?.` so it degrades gracefully.
 - OSRM `bicycle` is car-weighted with bike allowances; swap in a bike-aware
   backend (Valhalla/GraphHopper) for true bike routing.
 - Elevation is SRTM/NASADEM-scale (~30–90 m); per-vertex grade is smoothed and
-  measured over a 50 m window to reflect real terrain.
-- Surface is an area estimate from OSM tags near the route, not per-segment.
+  measured over a 50 m window to reflect real terrain. The route is sampled to
+  **≤100 equal-spaced points** for the elevation call (Open-Meteo caps at 100
+  coordinates per request; we also chunk as a safeguard). The headline distance
+  and time come from the router's own values, so they stay accurate regardless
+  of sampling.
+- **Path type / surface** is computed by fetching OSM `way`s (with geometry)
+  over the route's bounding box and snapping each probe point to the nearest way
+  vertex, then tallying `highway`/`surface`/`tracktype`/`maxspeed`. It's an
+  estimate per route area, not a perfectly projected trace — a short unmapped
+  detour could be mis-attributed. The query is skipped for routes whose bbox is
+  larger than `CONFIG.surfaceMaxBboxKm` (default 18 km across) to bound Overpass.
 - Overpass/Photon are best-effort: a timeout there won't fail the core route.
