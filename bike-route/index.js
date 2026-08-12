@@ -427,83 +427,154 @@ async function fetchSurfaceBreakdown(coordinates) {
 
 // ---------------------------------------------------------------------------
 // Map interaction
+//
+// GeoLibre exposes the map via `app.getMap()` (NOT a global `window.maplibregl`,
+// which is not defined inside the plugin sandbox). We draw the route line and
+// all points (start / end / POIs) as native MapLibre sources+geojson layers so
+// we never depend on the Marker/Popup classes either. Bounds fitting uses the
+// host's `app.fitBounds()`.
 // ---------------------------------------------------------------------------
 
 let mapInstance = null;
-let routeSourceId = null;
-let routeLayerId = null;
-let startMarker = null;
-let endMarker = null;
-const poiMarkers = [];
+let overlayIds = []; // ids of every source/layer/source we added, for cleanup
+
+function getMap() {
+  if (mapInstance) return mapInstance;
+  try {
+    if (appApi && typeof appApi.getMap === "function") {
+      mapInstance = appApi.getMap();
+      return mapInstance;
+    }
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
+function addId(kind, id) {
+  overlayIds.push({ kind, id });
+}
 
 function clearOverlays() {
-  if (!mapInstance) return;
-  try {
-    if (routeLayerId && mapInstance.getLayer(routeLayerId)) mapInstance.removeLayer(routeLayerId);
-    if (routeSourceId && mapInstance.getSource(routeSourceId)) mapInstance.removeSource(routeSourceId);
-    startMarker?.remove?.();
-    endMarker?.remove?.();
-    poiMarkers.forEach((m) => m.remove && m.remove());
-  } catch (e) { /* best effort */ }
-  routeLayerId = routeSourceId = null;
-  startMarker = endMarker = null;
-  poiMarkers.length = 0;
+  const map = getMap();
+  if (!map) return;
+  for (const { kind, id } of overlayIds.slice().reverse()) {
+    try {
+      if (kind === "layer" && map.getLayer && map.getLayer(id)) map.removeLayer(id);
+      if (kind === "source" && map.getSource && map.getSource(id)) map.removeSource(id);
+    } catch (e) { /* best effort */ }
+  }
+  overlayIds = [];
+}
+
+function ensureSource(map, id, data) {
+  if (map.getSource && map.getSource(id)) {
+    map.getSource(id).setData(data);
+  } else {
+    map.addSource(id, { type: "geojson", data });
+    addId("source", id);
+  }
 }
 
 function drawRoute(coordinates, steps) {
-  if (!mapInstance) return;
+  const map = getMap();
+  if (!map) { console.warn("[bike-route] no map available to draw"); return; }
   clearOverlays();
-  routeSourceId = `${CONTROL_ID}-src`;
-  routeLayerId = `${CONTROL_ID}-layer`;
 
   // One line layer, many coloured segment features (komoot-style steepness colour).
   const feats = [];
   for (let i = 1; i < coordinates.length; i++) {
-    const grade = steps[i - 1] ? steps[i - 1].grade : 0;
+    const grade = steps && steps[i - 1] ? steps[i - 1].grade : 0;
     feats.push({
       type: "Feature",
       properties: { color: gradeColor(grade) },
       geometry: { type: "LineString", coordinates: [coordinates[i - 1], coordinates[i]] },
     });
   }
-  const geojson = { type: "FeatureCollection", features: feats };
-
-  if (mapInstance.getSource(routeSourceId)) mapInstance.removeSource(routeSourceId);
-  mapInstance.addSource(routeSourceId, { type: "geojson", data: geojson });
-  mapInstance.addLayer({
-    id: routeLayerId,
-    type: "line",
-    source: routeSourceId,
-    layout: { "line-join": "round", "line-cap": "round" },
-    paint: { "line-color": ["get", "color"], "line-width": 5, "line-opacity": 0.92 },
-  });
-
-  const start = coordinates[0];
-  const end = coordinates[coordinates.length - 1];
-  if (window.maplibregl) {
-    startMarker = new window.maplibregl.Marker({ color: "#1c7ed6" }).setLngLat(start).addTo(mapInstance);
-    endMarker = new window.maplibregl.Marker({ color: "#e03131" }).setLngLat(end).addTo(mapInstance);
+  const routeSrc = `${CONTROL_ID}-route-src`;
+  const routeLayer = `${CONTROL_ID}-route-layer`;
+  ensureSource(map, routeSrc, { type: "FeatureCollection", features: feats });
+  if (!map.getLayer || !map.getLayer(routeLayer)) {
+    map.addLayer({
+      id: routeLayer,
+      type: "line",
+      source: routeSrc,
+      layout: { "line-join": "round", "line-cap": "round" },
+      paint: { "line-color": ["get", "color"], "line-width": 5, "line-opacity": 0.95 },
+    });
+    addId("layer", routeLayer);
   }
 
-  try {
-    const b = new window.maplibregl.LngLatBounds(start, start);
-    coordinates.forEach((c) => b.extend(c));
-    mapInstance.fitBounds(b, { padding: 60, duration: 800, maxZoom: 16 });
-  } catch (e) { /* fit optional */ }
+  // Points (start/end) as a circle layer — no Marker class needed.
+  const start = coordinates[0];
+  const end = coordinates[coordinates.length - 1];
+  const ptSrc = `${CONTROL_ID}-points-src`;
+  const ptLayer = `${CONTROL_ID}-points-layer`;
+  ensureSource(map, ptSrc, {
+    type: "FeatureCollection",
+    features: [
+      { type: "Feature", properties: { kind: "start", color: "#1c7ed6" }, geometry: { type: "Point", coordinates: start } },
+      { type: "Feature", properties: { kind: "end", color: "#e03131" }, geometry: { type: "Point", coordinates: end } },
+    ],
+  });
+  if (!map.getLayer || !map.getLayer(ptLayer)) {
+    map.addLayer({
+      id: ptLayer,
+      type: "circle",
+      source: ptSrc,
+      paint: {
+        "circle-radius": 7,
+        "circle-color": ["get", "color"],
+        "circle-stroke-width": 2,
+        "circle-stroke-color": "#fff",
+      },
+    });
+    addId("layer", ptLayer);
+  }
+
+  fitRoute(coordinates);
 }
 
 function drawPois(pois) {
-  if (!mapInstance || !window.maplibregl) return;
-  for (const p of pois) {
-    try {
-      const m = new window.maplibregl.Marker({ color: p.def.color })
-        .setLngLat([p.lon, p.lat])
-        .setPopup(new window.maplibregl.Popup({ offset: 18 }).setHTML(
-          `<strong>${escapeHtml(p.def.icon)} ${escapeHtml(p.def.label)}</strong><br>${escapeHtml(p.name)}`,
-        ))
-        .addTo(mapInstance);
-      poiMarkers.push(m);
-    } catch (e) { /* ignore */ }
+  const map = getMap();
+  if (!map || !pois.length) return;
+  const src = `${CONTROL_ID}-poi-src`;
+  const layer = `${CONTROL_ID}-poi-layer`;
+  ensureSource(map, src, {
+    type: "FeatureCollection",
+    features: pois.map((p) => ({
+      type: "Feature",
+      properties: { color: p.def.color, label: `${p.def.icon} ${escapeHtml(p.def.label)}`, name: escapeHtml(p.name) },
+      geometry: { type: "Point", coordinates: [p.lon, p.lat] },
+    })),
+  });
+  if (!map.getLayer || !map.getLayer(layer)) {
+    map.addLayer({
+      id: layer,
+      type: "circle",
+      source: src,
+      paint: {
+        "circle-radius": 5,
+        "circle-color": ["get", "color"],
+        "circle-stroke-width": 1.5,
+        "circle-stroke-color": "#fff",
+      },
+    });
+    addId("layer", layer);
+  }
+}
+
+function fitRoute(coordinates) {
+  if (!coordinates.length) return;
+  let s = 90, w = 180, n = -90, e = -180;
+  for (const [lon, lat] of coordinates) {
+    if (lat < s) s = lat; if (lat > n) n = lat;
+    if (lon < w) w = lon; if (lon > e) e = lon;
+  }
+  const bounds = [w, s, e, n];
+  if (appApi && typeof appApi.fitBounds === "function") {
+    appApi.fitBounds(bounds);
+  } else {
+    const map = getMap();
+    if (map && map.fitBounds) map.fitBounds(bounds, { padding: 60, duration: 800, maxZoom: 16 });
   }
 }
 
@@ -656,25 +727,45 @@ function buildPanelBody(container, app) {
   }
   setTab("overview");
 
+  function drawTempPin(coords, color) {
+    const map = getMap();
+    if (!map) return;
+    const src = `${CONTROL_ID}-pin-src`;
+    const layer = `${CONTROL_ID}-pin-layer`;
+    const data = { type: "FeatureCollection", features: [
+      { type: "Feature", properties: { color }, geometry: { type: "Point", coordinates: coords } },
+    ] };
+    if (map.getSource && map.getSource(src)) map.getSource(src).setData(data);
+    else map.addSource(src, { type: "geojson", data });
+    if (!map.getLayer || !map.getLayer(layer)) {
+      map.addLayer({
+        id: layer, type: "circle", source: src,
+        paint: { "circle-radius": 7, "circle-color": color, "circle-stroke-width": 2, "circle-stroke-color": "#fff" },
+      });
+      overlayIds.push({ kind: "layer", id: layer });
+      overlayIds.push({ kind: "source", id: src });
+    }
+  }
+
   function onClick(e) {
     if (!pickMode || !pickWhich) return;
     const ll = e.lngLat;
     const txt = `${ll.lng.toFixed(5)}, ${ll.lat.toFixed(5)}`;
     if (pickWhich === "start") {
       startInput.value = txt;
-      if (mapInstance && window.maplibregl && startMarker?.remove) startMarker.remove();
-      if (mapInstance && window.maplibregl) startMarker = new window.maplibregl.Marker({ color: "#1c7ed6" }).setLngLat([ll.lng, ll.lat]).addTo(mapInstance);
+      drawTempPin([ll.lng, ll.lat], "#1c7ed6");
     } else {
       endInput.value = txt;
-      if (mapInstance && window.maplibregl && endMarker?.remove) endMarker.remove();
-      if (mapInstance && window.maplibregl) endMarker = new window.maplibregl.Marker({ color: "#e03131" }).setLngLat([ll.lng, ll.lat]).addTo(mapInstance);
+      drawTempPin([ll.lng, ll.lat], "#e03131");
     }
     pickMode = false; pickWhich = null;
     modeBtn.textContent = "Drop pins on map: OFF";
     modeBtn.classList.remove("is-on");
-    if (mapInstance && mapInstance.getCanvas) mapInstance.getCanvas().style.cursor = "";
+    const map = getMap();
+    if (map && map.getCanvas) map.getCanvas().style.cursor = "";
   }
-  if (mapInstance && mapInstance.on) mapInstance.on("click", onClick);
+  const map = getMap();
+  if (map && map.on) map.on("click", onClick);
 
   // --- run handler -----------------------------------------------------------
   runBtn.addEventListener("click", async () => {
@@ -739,7 +830,7 @@ function buildPanelBody(container, app) {
   });
 
   container.appendChild(wrap);
-  return () => { if (mapInstance && mapInstance.off) mapInstance.off("click", onClick); };
+  return () => { const m = getMap(); if (m && m.off) m.off("click", onClick); };
 }
 
 function renderOverview(node, route, profile) {
@@ -826,7 +917,8 @@ function renderHighlights(node, pois, surface) {
       b.append(el("div", "bike-poi-type", p.def.label));
       li.appendChild(b);
       li.addEventListener("click", () => {
-        if (mapInstance && mapInstance.flyTo) mapInstance.flyTo({ center: [p.lon, p.lat], zoom: 15 });
+        const m = getMap();
+        if (m && m.flyTo) m.flyTo({ center: [p.lon, p.lat], zoom: 15 });
       });
       list.appendChild(li);
     });
@@ -843,7 +935,8 @@ const control = {
   _container: null,
   _map: null,
   onAdd(map) {
-    mapInstance = map;
+    if (map) mapInstance = map;
+    else if (appApi && typeof appApi.getMap === "function") mapInstance = appApi.getMap();
     const container = document.createElement("div");
     container.className = "maplibregl-ctrl maplibregl-ctrl-group bike-route-control";
     const button = document.createElement("button");

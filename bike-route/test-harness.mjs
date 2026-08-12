@@ -64,15 +64,24 @@ const windowShim = {
 };
 
 const fakeMap = {
+  _sources: {}, _layers: {},
   on() {}, off() {}, getCanvas() { return { style: {} }; },
   getCenter() { return { lng: 13.3777, lat: 52.5169 }; },
-  fitBounds() {}, addSource() {}, addLayer() {},
-  getSource() { return null; }, getLayer() { return null; }, flyTo() {},
+  getSource(id) { return this._sources[id] || null; },
+  getLayer(id) { return this._layers[id] || null; },
+  addSource(id, def) { this._sources[id] = { setData: (d) => { this._sources[id].data = d; } }; return id; },
+  addLayer(def) { this._layers[def.id] = def; return def.id; },
+  removeSource(id) { delete this._sources[id]; },
+  removeLayer(id) { delete this._layers[id]; },
+  fitBounds() { this._fit = true; },
+  flyTo() {},
 };
 
 const fakeApp = {
   addMapControl() { return true; },
   removeMapControl() {},
+  getMap() { return fakeMap; },
+  fitBounds() { fakeMap._fit = true; },
   registerRightPanel(panel) { fakeApp._render = panel.render; return () => {}; },
   openRightPanel() {},
   registerToolbarMenu() { return () => {}; },
@@ -129,6 +138,15 @@ console.log("difficulty badge:", diff ? diff.textContent : "n/a");
 
 const chart = findEl(container, (n) => n.className === "bike-elev-chart");
 console.log("elevation chart rendered:", chart ? "yes" : "no");
+
+// --- MAP DRAWING ASSERTIONS (the user's bug: "no points/lines") ---
+console.log("map layers added:",
+  "route=" + (fakeMap._layers["bike-route-control-route-layer"] ? "yes" : "NO"),
+  "points=" + (fakeMap._layers["bike-route-control-points-layer"] ? "yes" : "NO"),
+  "fitBounds=" + (fakeMap._fit ? "yes" : "NO"));
+console.assert(fakeMap._layers["bike-route-control-route-layer"], "route line layer missing");
+console.assert(fakeMap._layers["bike-route-control-points-layer"], "start/end points layer missing");
+console.assert(fakeMap._fit, "fitBounds not called");
 
 // Assertions on real data
 const distance = statValues[0] || "";
