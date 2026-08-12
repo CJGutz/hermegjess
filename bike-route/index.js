@@ -26,7 +26,14 @@ const RIGHT_PANEL_ID = "bike-route-panel";
 // CONFIG -- swap these for your own backends.
 // ---------------------------------------------------------------------------
 const CONFIG = {
-  routingBase: "https://router.project-osrm.org/route/v1",
+  // OSRM-compatible routing backends, tried in order. The public
+  // router.project-osrm.org demo is flaky (rate-limits / intermittent CORS),
+  // so routing.openstreetmap.de is listed as a fallback. All are OSRM v1
+  // REST APIs: <base>/<profile>/<lon1,lat1>;<lon2,lat2>?...
+  routingBackends: [
+    "https://router.project-osrm.org/route/v1",
+    "https://routing.openstreetmap.de/routed-bike/route/v1",
+  ],
   profile: "bicycle", // "bicycle" | "foot" | "driving"
   elevationBase: "https://api.open-meteo.com/v1/elevation",
   geocoderBase: "https://photon.komoot.io",
@@ -94,7 +101,7 @@ async function fetchJson(url, { timeout = CONFIG.timeoutMs, method = "GET", body
     const res = await fetch(url, {
       method,
       signal: ctrl.signal,
-      headers: { Accept: "application/json", "User-Agent": "geolibre-bike-route/1.0.0" },
+      headers: { Accept: "application/json" },
       body,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -113,7 +120,6 @@ async function fetchText(url, body, { timeout = CONFIG.timeoutMs } = {}) {
       signal: ctrl.signal,
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "geolibre-bike-route/1.0.0",
       },
       body,
     });
@@ -183,33 +189,48 @@ function maneuverText(step) {
 
 async function fetchRoute(start, end) {
   const coords = `${start[0]},${start[1]};${end[0]},${end[1]}`;
-  const url =
-    `${CONFIG.routingBase}/${CONFIG.profile}/${coords}` +
-    `?overview=full&geometries=geojson&steps=true`;
-  const data = await fetchJson(url);
-  if (!data || data.code !== "Ok" || !data.routes || !data.routes.length) {
-    throw new Error(data && data.message ? data.message : "No route found");
-  }
-  const route = data.routes[0];
-  const steps = [];
-  if (route.legs) {
-    for (const leg of route.legs) {
-      for (const s of leg.steps || []) {
-        steps.push({
-          text: maneuverText(s),
-          arrow: maneuverArrow(s.maneuver && s.maneuver.modifier),
-          distance: s.distance || 0,
-          name: s.name || "",
-        });
+  const errors = [];
+  for (const base of CONFIG.routingBackends) {
+    const url =
+      `${base}/${CONFIG.profile}/${coords}` +
+      `?overview=full&geometries=geojson&steps=true`;
+    try {
+      const data = await fetchJson(url);
+      if (!data || data.code !== "Ok" || !data.routes || !data.routes.length) {
+        errors.push(`${base}: ${data && data.message ? data.message : "no route"}`);
+        continue;
       }
+      const route = data.routes[0];
+      const steps = [];
+      if (route.legs) {
+        for (const leg of route.legs) {
+          for (const s of leg.steps || []) {
+            steps.push({
+              text: maneuverText(s),
+              arrow: maneuverArrow(s.maneuver && s.maneuver.modifier),
+              distance: s.distance || 0,
+              name: s.name || "",
+            });
+          }
+        }
+      }
+      return {
+        coordinates: route.geometry.coordinates, // [ [lon,lat], ... ]
+        distance: route.distance,
+        duration: route.duration,
+        steps,
+        backend: base,
+      };
+    } catch (err) {
+      errors.push(`${base}: ${err.message || err}`);
+      // Try the next backend.
     }
   }
-  return {
-    coordinates: route.geometry.coordinates, // [ [lon,lat], ... ]
-    distance: route.distance,
-    duration: route.duration,
-    steps,
-  };
+  throw new Error(
+    `All routing backends failed:\n${errors.join("\n")}\n\n` +
+      `This is usually a CORS/network block on the external OSRM host. ` +
+      `Try the GeoLibre desktop app (not subject to browser CORS), or check your firewall/proxy.`,
+  );
 }
 
 // ---------------------------------------------------------------------------
