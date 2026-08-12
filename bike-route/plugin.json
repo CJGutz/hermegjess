@@ -1,7 +1,7 @@
 {
   "id": "geolibre-bike-route",
   "name": "Bike Route",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "komoot-style bike route: fastest bicycle route with distance, time, elevation profile, difficulty rating, turn-by-turn directions, calories, surface estimate, and POIs (water, bike shops, viewpoints) along the way. Draws the route coloured by steepness.",
   "entry": "index.js",
   "style": "style.css",
