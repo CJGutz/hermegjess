@@ -148,9 +148,24 @@ console.assert(fakeMap._layers["bike-route-control-route-layer"], "route line la
 console.assert(fakeMap._layers["bike-route-control-points-layer"], "start/end points layer missing");
 console.assert(fakeMap._fit, "fitBounds not called");
 
+// --- PATH-TYPE / SURFACE ASSERTIONS (user req #3) ---
+// Give the async path-types + POI fetch time to resolve.
+await new Promise((r) => setTimeout(r, 8000));
+const allTabs = [];
+(function collect(n) { for (const c of n._children || []) { if (c.className === "bike-tab-content") allTabs.push(c); collect(c); } })(container);
+let ptText = "";
+for (const t of allTabs) {
+  (function walk(n) { for (const c of n._children || []) { if (c.textContent) ptText += c.textContent + " "; walk(c); } })(t);
+}
+console.log("highlights mentions Path type:", /Path type/.test(ptText) ? "yes" : "no");
+console.log("highlights mentions Surface:", /Surface/.test(ptText) ? "yes" : "no");
+console.log("highlights mentions Paved:", /Paved/.test(ptText) ? "yes" : "no");
+console.log("highlights sample:", ptText.slice(0, 260).replace(/\s+/g, " "));
+
 // Assertions on real data
 const distance = statValues[0] || "";
 console.assert(/km|m/.test(distance), "distance formatted");
+console.assert(parseFloat(distance) > 2 && parseFloat(distance) < 6, "distance in sane range (~3.8 km)");
 console.log("\nRESULT:", distance ? "pipeline produced a route" : "NO ROUTE");
 
 // Clean shutdown

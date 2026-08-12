@@ -32,6 +32,10 @@ const CONFIG = {
   geocoderBase: "https://photon.komoot.io",
   overpassBase: "https://overpass-api.de/api/interpreter",
   maxElevationSamples: 240,
+  // Douglas–Peucker tolerance (metres) used to simplify the route before
+  // probing elevation/path-type services. Higher = fewer API points (Open-Meteo
+  // caps at 100 coords/call). 30 m keeps turns/hills, drops redundant vertices.
+  simplifyTolM: 30,
   timeoutMs: 25000,
   // Only estimate surfaces when the route bbox is smaller than this (km across),
   // to keep the Overpass query bounded.
@@ -222,6 +226,54 @@ function sampleAlong(coordinates, maxSamples) {
   return out;
 }
 
+// Geometry simplification (Douglas–Peucker on lon/lat degrees) so we send far
+// fewer probe points to the elevation + path-type services. Long edges are
+// split into <=maxSegLenM pieces first, otherwise DP would drop sharp corners
+// on a straight 2 km leg and we'd miss a hill/restriction.
+function simplifyCoordinates(coordinates, tolMetres, maxSegLenM = 200) {
+  const pts = coordinates.map((c) => ({ c, x: c[0], y: c[1] }));
+  // 1) densify long segments so DP sees the real shape.
+  const dens = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1].c, b = pts[i].c;
+    const d = haversine(a, b);
+    const pieces = Math.min(200, Math.max(1, Math.floor(d / maxSegLenM)));
+    for (let k = 1; k <= pieces; k++) {
+      const t = k / pieces;
+      dens.push({ c: [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], x: 0, y: 0 });
+    }
+  }
+  // 2) DP.
+  const tolDeg = tolMetres / 111320; // ~metres per degree latitude
+  const keep = new Array(dens.length).fill(false);
+  keep[0] = keep[dens.length - 1] = true;
+  const stack = [[0, dens.length - 1]];
+  while (stack.length) {
+    const [lo, hi] = stack.pop();
+    if (hi - lo < 2) continue;
+    let maxD = -1, idx = -1;
+    for (let i = lo + 1; i < hi; i++) {
+      const d = perpDist(dens[i], dens[lo], dens[hi]);
+      if (d > maxD) { maxD = d; idx = i; }
+    }
+    if (maxD > tolDeg) {
+      keep[idx] = true;
+      stack.push([lo, idx], [idx, hi]);
+    }
+  }
+  const out = [];
+  for (let i = 0; i < dens.length; i++) if (keep[i]) out.push(dens[i].c);
+  if (out.length < 2) return [pts[0].c, pts[pts.length - 1].c];
+  return out;
+}
+
+function perpDist(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const len = Math.hypot(dx, dy);
+  if (len === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+  return Math.abs((p.x - a.x) * dy - (p.y - a.y) * dx) / len;
+}
+
 async function fetchElevations(coordinates) {
   const CHUNK = 50; // Open-Meteo rejects >~100 points per call
   const out = [];
@@ -259,7 +311,7 @@ const GRADE_WINDOW = 50; // metres the per-vertex grade is averaged over
 
 // Build the elevation profile (distance vs elevation) and per-vertex grade
 // using a distance-windowed gradient so short segments don't produce spikes.
-function buildProfile(coordinates, elevations) {
+function buildProfile(coordinates, elevations, routeDistance) {
   const elev = smoothElevations(elevations, 5);
   const n = coordinates.length;
   const cum = new Array(n).fill(0);
@@ -295,8 +347,11 @@ function buildProfile(coordinates, elevations) {
     steps.push({ length: segLen, dElevation: dEle, grade, category: cat });
   }
 
-  const total = cum[n - 1] || 0;
-  const pct = (v) => (total > 0 ? (v / total) * 100 : 0);
+  const sampledTotal = cum[n - 1] || 0;
+  // Use the router's authoritative distance for the headline number; the
+  // sampled distance only drives the relative terrain percentages.
+  const total = routeDistance != null && isFinite(routeDistance) ? routeDistance : sampledTotal;
+  const pct = (v) => (sampledTotal > 0 ? (v / sampledTotal) * 100 : 0);
   const summary = {
     ascent, descent, maxEle, minEle,
     flatPct: pct(flat), rollingPct: pct(rolling), hillyPct: pct(hilly), steepPct: pct(steep),
@@ -399,31 +454,105 @@ async function fetchHighlights(coordinates) {
   return out;
 }
 
-async function fetchSurfaceBreakdown(coordinates) {
+// Path-type + surface from OpenStreetMap. We pull *ways with full geometry*
+// (highway, surface, tracktype, maxspeed, bridge, tunnel) over the route bbox,
+// then walk the simplified probe points and find the nearest way vertex
+// (= assumed path segment) for each. This gives a real per-route breakdown of
+// what kind of path it is (cycleway, footway, residential road, track/gravel,
+// path, steps…) plus the surface mix and an average max speed.
+const HIGHWAY_LABEL = {
+  motorway: "Motorway", trunk: "Trunk road", primary: "Primary road",
+  secondary: "Secondary road", tertiary: "Tertiary road", unclassified: "Unclassified road",
+  residential: "Residential road", living_street: "Living street", service: "Service road",
+  pedestrian: "Pedestrian zone", footway: "Footway", path: "Path", cycleway: "Cycleway",
+  track: "Track", steps: "Steps", bridleway: "Bridleway", corridor: "Corridor",
+  "primary_link": "Primary link", "secondary_link": "Secondary link",
+  "tertiary_link": "Tertiary link", "motorway_link": "Motorway link", "trunk_link": "Trunk link",
+  construction: "Under construction",
+};
+const PAVED_SURFACES = new Set([
+  "asphalt", "paved", "concrete", "cobblestone", "sett", "paving_stones",
+  "concrete:plates", "concrete:lanes", "metal", "wood", "artificial_turf",
+]);
+const UNPAVED_HINT = new Set(["track", "path", "footway", "bridleway", "steps"]);
+
+function fetchPathTypes(coordinates) {
   const [s, w, n, e] = routeBbox(coordinates);
   const diag = haversine([w, s], [e, n]) / 1000;
   if (diag > CONFIG.surfaceMaxBboxKm) return null; // keep the query bounded
   const bbox = `${s},${w},${n},${e}`;
-  const q = `[out:json][timeout:20];way["surface"](${bbox});out tags 300;`;
-  const txt = await fetchText(CONFIG.overpassBase, "data=" + encodeURIComponent(q));
-  const data = JSON.parse(txt);
-  const tally = {};
-  let total = 0;
-  for (const el of data.elements || []) {
-    const surf = (el.tags && el.tags.surface) || "unknown";
-    tally[surf] = (tally[surf] || 0) + 1;
-    total++;
-  }
-  if (!total) return null;
-  const paved = ["asphalt", "paved", "concrete", "cobblestone", "sett", "metal", "wood"];
-  let pavedN = 0;
-  for (const [k, v] of Object.entries(tally)) if (paved.includes(k)) pavedN += v;
-  return {
-    pavedPct: (pavedN / total) * 100,
-    unpavedPct: ((total - pavedN) / total) * 100,
-    raw: tally,
-  };
+  const q =
+    `[out:json][timeout:25];(` +
+    'way["highway"](' + bbox + ");" +
+    ");out geom 600;";
+  return fetchText(CONFIG.overpassBase, "data=" + encodeURIComponent(q)).then((txt) => {
+    const data = JSON.parse(txt);
+    const ways = (data.elements || []).filter((el) => el.type === "way" && el.geometry);
+    if (!ways.length) return null;
+
+    // Pre-index every (lon,lat) vertex of every way.
+    const verts = [];
+    for (let wi = 0; wi < ways.length; wi++) {
+      const g = ways[wi].geometry;
+      for (let i = 0; i < g.length; i++) verts.push({ lon: g[i].lon, lat: g[i].lat, wi, vi: i });
+    }
+
+    const highwayTally = {};
+    const surfaceTally = {};
+    const trackTally = {};
+    let pavedSegs = 0, unpavedSegs = 0, unknownSegs = 0;
+    let speedSum = 0, speedN = 0;
+    const seen = new Set();
+
+    for (const p of coordinates) {
+      // nearest way vertex to this probe point (coarse, but routes follow ways)
+      let best = null, bestD = Infinity;
+      for (let k = 0; k < verts.length; k++) {
+        const v = verts[k];
+        const d = (v.lon - p[0]) ** 2 + (v.lat - p[1]) ** 2;
+        if (d < bestD) { bestD = d; best = v; }
+      }
+      if (!best) continue;
+      const wi = best.wi;
+      const key = `${wi}:${best.vi}`;
+      if (seen.has(key)) continue; // one vote per way-vertex per route
+      seen.add(key);
+      const t = ways[wi].tags || {};
+      const hw = t.highway || "unknown";
+      highwayTally[hw] = (highwayTally[hw] || 0) + 1;
+      const surf = t.surface || (UNPAVED_HINT.has(hw) && !t.surface ? "unpaved (assumed)" : "unknown");
+      surfaceTally[surf] = (surfaceTally[surf] || 0) + 1;
+      if (t.tracktype) trackTally[t.tracktype] = (trackTally[t.tracktype] || 0) + 1;
+      if (t.surface) { if (PAVED_SURFACES.has(t.surface)) pavedSegs++; else unpavedSegs++; }
+      else if (UNPAVED_HINT.has(hw)) unpavedSegs++;
+      else unknownSegs++;
+      if (t.maxspeed) {
+        const m = parseInt(t.maxspeed, 10);
+        if (!isNaN(m)) { speedSum += m; speedN++; }
+      }
+    }
+
+    const total = Object.values(highwayTally).reduce((a, b) => a + b, 0) || 1;
+    const sortByCount = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1]);
+    const topHighway = sortByCount(highwayTally)[0];
+    const segTotal = pavedSegs + unpavedSegs + unknownSegs || 1;
+    return {
+      topType: topHighway ? HIGHWAY_LABEL[topHighway[0]] || topHighway[0] : "unknown",
+      topTypePct: topHighway ? (topHighway[1] / total) * 100 : 0,
+      highway: sortByCount(highwayTally).map(([k, v]) => ({ label: HIGHWAY_LABEL[k] || k, pct: (v / total) * 100 })),
+      surface: sortByCount(surfaceTally).map(([k, v]) => ({ label: k, pct: (v / surfaceTallyCount(surfaceTally)) * 100 })),
+      tracktype: sortByCount(trackTally).map(([k, v]) => ({ label: k, pct: (v / trackTallyCount(trackTally)) * 100 })),
+      pavedPct: (pavedSegs / segTotal) * 100,
+      unpavedPct: (unpavedSegs / segTotal) * 100,
+      unknownPct: (unknownSegs / segTotal) * 100,
+      avgMaxSpeed: speedN ? Math.round(speedSum / speedN) : null,
+      nWays: ways.length,
+    };
+  });
 }
+
+function surfaceTallyCount(obj) { return Object.values(obj).reduce((a, b) => a + b, 0) || 1; }
+function trackTallyCount(obj) { return Object.values(obj).reduce((a, b) => a + b, 0) || 1; }
 
 // ---------------------------------------------------------------------------
 // Map interaction
@@ -650,46 +779,52 @@ function elevationChart(profile) {
 function buildPanelBody(container, app) {
   const wrap = el("div", "bike-panel");
 
-  // --- input row -----------------------------------------------------------
+  // --- start / end inputs with on-map pick ----------------------------------
   const intro = el("p", "bike-intro",
-    "Fastest bicycle route between two points. Enter coordinates (lon, lat) or drop pins on the map.");
+    "Pick Start and End on the map, type coordinates (lon, lat), or use the map centre. Then Plan route.");
   wrap.appendChild(intro);
 
-  const modeBtn = el("button", "bike-btn bike-btn-ghost", "Drop pins on map: OFF");
   let pickMode = false, pickWhich = null;
-  modeBtn.addEventListener("click", () => {
-    pickMode = !pickMode;
-    if (pickMode) {
-      pickWhich = !startInput.value ? "start" : "end";
-      modeBtn.textContent = `Pick ${pickWhich} (click map)`;
-      modeBtn.classList.add("is-on");
-      if (mapInstance && mapInstance.getCanvas) mapInstance.getCanvas().style.cursor = "crosshair";
-    } else {
-      modeBtn.textContent = "Drop pins on map: OFF";
-      modeBtn.classList.remove("is-on");
-      if (mapInstance && mapInstance.getCanvas) mapInstance.getCanvas().style.cursor = "";
-    }
-  });
-  wrap.appendChild(modeBtn);
+  const modeBtns = {};
 
-  function field(label, placeholder, inputEl) {
+  function setPick(which) {
+    // Toggle: clicking the active chip turns picking off.
+    if (pickMode && pickWhich === which) which = null;
+    pickMode = !!which;
+    pickWhich = which;
+    for (const w of ["start", "end"]) {
+      const on = pickMode && pickWhich === w;
+      modeBtns[w].classList.toggle("is-on", on);
+      modeBtns[w].textContent = on ? `📍 Pick ${w}… (click map)` : `📍 Pick ${w} on map`;
+    }
+    const m = getMap();
+    if (m && m.getCanvas) m.getCanvas().style.cursor = pickMode ? "crosshair" : "";
+  }
+
+  function field(label, placeholder, inputEl, pickWhichKey) {
     const f = el("label", "bike-field");
     f.append(el("span", null, label));
     inputEl.className = "bike-input";
     inputEl.placeholder = placeholder;
     f.appendChild(inputEl);
+    const pickBtn = el("button", "bike-btn bike-btn-ghost bike-btn-sm bike-pick", `📍 Pick ${pickWhichKey} on map`);
+    pickBtn.addEventListener("click", () => setPick(pickWhichKey));
+    modeBtns[pickWhichKey] = pickBtn;
+    f.appendChild(pickBtn);
     return f;
   }
   const startInput = document.createElement("input");
   const endInput = document.createElement("input");
-  const startWrap = field("Start (lon, lat)", "13.4132, 52.5220", startInput);
-  const endWrap = field("End (lon, lat)", "13.3777, 52.5169", endInput);
+  const startWrap = field("Start (lon, lat)", "13.4132, 52.5220", startInput, "start");
+  const endWrap = field("End (lon, lat)", "13.3777, 52.5169", endInput, "end");
 
-  const centerBtn = el("button", "bike-btn bike-btn-ghost bike-btn-sm", "Use map center → end");
+  const centerBtn = el("button", "bike-btn bike-btn-ghost bike-btn-sm", "Use map centre → end");
   centerBtn.addEventListener("click", () => {
-    if (mapInstance && mapInstance.getCenter) {
-      const c = mapInstance.getCenter();
+    const m = getMap();
+    if (m && m.getCenter) {
+      const c = m.getCenter();
       endInput.value = `${c.lng.toFixed(5)}, ${c.lat.toFixed(5)}`;
+      drawTempPin([c.lng, c.lat], "#e03131");
     }
   });
   endWrap.appendChild(centerBtn);
@@ -727,11 +862,12 @@ function buildPanelBody(container, app) {
   }
   setTab("overview");
 
-  function drawTempPin(coords, color) {
+  function drawTempPin(which, coords) {
     const map = getMap();
     if (!map) return;
-    const src = `${CONTROL_ID}-pin-src`;
-    const layer = `${CONTROL_ID}-pin-layer`;
+    const color = which === "start" ? "#1c7ed6" : "#e03131";
+    const src = `${CONTROL_ID}-pin-${which}-src`;
+    const layer = `${CONTROL_ID}-pin-${which}-layer`;
     const data = { type: "FeatureCollection", features: [
       { type: "Feature", properties: { color }, geometry: { type: "Point", coordinates: coords } },
     ] };
@@ -753,14 +889,12 @@ function buildPanelBody(container, app) {
     const txt = `${ll.lng.toFixed(5)}, ${ll.lat.toFixed(5)}`;
     if (pickWhich === "start") {
       startInput.value = txt;
-      drawTempPin([ll.lng, ll.lat], "#1c7ed6");
+      drawTempPin("start", [ll.lng, ll.lat]);
     } else {
       endInput.value = txt;
-      drawTempPin([ll.lng, ll.lat], "#e03131");
+      drawTempPin("end", [ll.lng, ll.lat]);
     }
-    pickMode = false; pickWhich = null;
-    modeBtn.textContent = "Drop pins on map: OFF";
-    modeBtn.classList.remove("is-on");
+    setPick(null);
     const map = getMap();
     if (map && map.getCanvas) map.getCanvas().style.cursor = "";
   }
@@ -786,11 +920,18 @@ function buildPanelBody(container, app) {
     runBtn.disabled = true;
     try {
       const route = await fetchRoute(start, end);
-      const samples = sampleAlong(route.coordinates, CONFIG.maxElevationSamples);
-      const elevations = await fetchElevations(samples);
-      const profile = buildProfile(samples, elevations);
+      // Sample the full geometry at equal spacing, capped at 100 points so the
+      // elevation call stays within Open-Meteo's 100-coords/call limit (we also
+      // chunk as a safeguard). Equal spacing keeps the elevation + distance
+      // accurate without the under-counting that aggressive simplification causes.
+      const probe = sampleAlong(route.coordinates, 100);
+      const elevations = await fetchElevations(probe);
+      const profile = buildProfile(probe, elevations, route.distance);
 
-      drawRoute(samples, profile.steps);
+      // Draw a lightly simplified line (fewer vertices) but compute metrics on
+      // the full 100-point probe so distance/elevation stay accurate.
+      const drawn = simplifyCoordinates(route.coordinates, 12, 100);
+      drawRoute(drawn.length >= 2 ? drawn : probe, profile.steps);
       renderOverview(tabContent.overview, route, profile);
       renderDirections(tabContent.directions, route.steps);
       tabContent.highlights.innerHTML = '<div class="bike-loading">Loading highlights…</div>';
@@ -805,14 +946,14 @@ function buildPanelBody(container, app) {
         if (sub) sub.textContent = `${sn || "start"} → ${en || "end"}`;
       }
 
-      // Highlights + surface (best-effort, don't block the core result)
+      // Highlights + path-type/surface (best-effort, don't block the core result)
       try {
-        const [pois, surface] = await Promise.all([
-          fetchHighlights(samples),
-          fetchSurfaceBreakdown(samples),
+        const [pois, pathTypes] = await Promise.all([
+          fetchHighlights(probe),
+          fetchPathTypes(probe),
         ]);
         drawPois(pois);
-        renderHighlights(tabContent.highlights, pois, surface);
+        renderHighlights(tabContent.highlights, pois, pathTypes);
       } catch (err) {
         tabContent.highlights.innerHTML = '<div class="bike-loading">Highlights unavailable (Overpass timeout or blocked).</div>';
       }
@@ -893,16 +1034,37 @@ function renderDirections(node, steps) {
   node.appendChild(list);
 }
 
-function renderHighlights(node, pois, surface) {
+function renderHighlights(node, pois, pathTypes) {
   node.innerHTML = "";
-  if (surface) {
-    const card = el("div", "bike-card");
-    card.append(el("div", "bike-card-title", "Surface (est. from OSM)"));
-    card.append(barRow("Paved", surface.pavedPct, "#2f9e44"));
-    card.append(barRow("Unpaved", surface.unpavedPct, "#e8590c"));
-    card.append(el("div", "bike-card-sub", "Estimated from OpenStreetMap surface tags in the route area."));
-    node.appendChild(card);
+
+  if (pathTypes) {
+    // Path-type breakdown (what kind of way it is).
+    const pt = el("div", "bike-card");
+    pt.append(el("div", "bike-card-title", "Path type"));
+    const head = el("div", "bike-card-sub");
+    head.innerHTML = `Main: <strong>${escapeHtml(pathTypes.topType)}</strong> (${pathTypes.topTypePct.toFixed(0)}%)` +
+      (pathTypes.avgMaxSpeed ? ` · avg limit ${pathTypes.avgMaxSpeed} km/h` : "");
+    pt.appendChild(head);
+    for (const h of pathTypes.highway.slice(0, 6)) {
+      pt.append(barRow(h.label, h.pct, "#1c7ed6"));
+    }
+    if (pathTypes.nWays) pt.append(el("div", "bike-card-sub", `From ${pathTypes.nWays} OSM ways along the route.`));
+    node.appendChild(pt);
+
+    // Surface mix (paved vs unpaved + named surfaces).
+    const sf = el("div", "bike-card");
+    sf.append(el("div", "bike-card-title", "Surface"));
+    sf.append(barRow("Paved", pathTypes.pavedPct, "#2f9e44"));
+    sf.append(barRow("Unpaved", pathTypes.unpavedPct, "#e8590c"));
+    if (pathTypes.unknownPct > 0) sf.append(barRow("Unspecified", pathTypes.unknownPct, "#868e96"));
+    for (const s of pathTypes.surface.slice(0, 5)) {
+      sf.append(el("div", "bike-card-sub", `${escapeHtml(s.label)} · ${s.pct.toFixed(0)}%`));
+    }
+    node.appendChild(sf);
+  } else {
+    node.append(el("div", "bike-card-sub", "Path-type data unavailable (route too large or Overpass blocked)."));
   }
+
   const card = el("div", "bike-card");
   card.append(el("div", "bike-card-title", `Highlights along the route (${pois.length})`));
   if (!pois.length) {
